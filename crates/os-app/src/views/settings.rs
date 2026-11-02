@@ -636,6 +636,10 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                         combo(&buffer, 190.0, BUFFER_LENGTH),
                         Check("Auto close", false),
                     ],
+                    vec![
+                        Check(crate::prefs::DIRECT_RENDERING.label, false),
+                        Text("Renders each block as the device asks for it, with no margin ahead: REAPER-like latency, but a heavy project or plugin is heard as dropouts. Experimental.".into(), true),
+                    ],
                     st.instead.iter().map(|i| Text(i.clone(), true)).collect(),
                     vec![Text(st.status[0].clone(), true), Text(st.status[1].clone(), true)],
                     // Below Status, as FL has it; there are ASIO drivers on Windows only. The ASIO logo goes with them

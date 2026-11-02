@@ -411,6 +411,11 @@ pub const MULTITHREADED_GENERATORS: Check =
 /// audio/multicore.md "Only when needed".
 pub const MULTITHREADED_AUTO: Check = Check { key: "multithreaded_auto", label: "Extra cores only when needed", default: true };
 
+/// Audio ▸ Input / output (local patch, experimental): streams render in the device callback, just the block asked
+/// for, instead of a block and a margin ahead on a feeder thread (`transport::direct_mode`). Lowest latency; a tick
+/// heavier than a block's time is heard as an underrun. `LEMON_DIRECT` in the environment overrides it.
+pub const DIRECT_RENDERING: Check = Check { key: "direct_rendering", label: "Direct rendering (lowest latency)", default: false };
+
 /// Audio ▸ Mixer: stored and shown only. The sampler keeps the one kernel audio/sampler.md gives, whatever is chosen;
 /// when the live kernels are measured, the choice will pick among them. Its menu groups the choices under grey
 /// headings (`headings`). Spec: as above.
@@ -612,6 +617,7 @@ pub const CHECKS: &[&Check] = &[
     &MULTITHREADED_MIXER,
     &MULTITHREADED_GENERATORS,
     &MULTITHREADED_AUTO,
+    &DIRECT_RENDERING,
     &INVERT_PENCIL_BUTTONS,
     &COPY_USED_SAMPLES,
     &PICKUP,
@@ -806,6 +812,10 @@ impl App {
         let on = toggle(c);
         if c.key == MULTITHREADED_MIXER.key || c.key == MULTITHREADED_GENERATORS.key || c.key == MULTITHREADED_AUTO.key {
             crate::mix_threads::apply();
+        }
+        // The playing streams start again rendering the new way.
+        if c.key == DIRECT_RENDERING.key {
+            self.transport.reopen();
         }
         // Recording ▸ Start on input off ends a wait for input, as its toolbar button does.
         if c.key == REC_WAIT.key && !on {

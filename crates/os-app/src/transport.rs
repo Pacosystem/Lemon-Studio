@@ -1052,12 +1052,26 @@ struct Feeder {
     ctl: Arc<Ctl>,
     /// Publish the mixer meters and the load (playback and live streams, not previews).
     meters: bool,
+    /// Keep the margin queued beyond the block; off in direct mode, where `fill` runs in the device callback and must
+    /// not wait for the UI's locks either.
+    margin: bool,
     rate: u32,
     /// Time spent rendering and frames rendered since the load was last published.
     busy: Duration,
     rendered: u64,
     /// The engine's voices after the last fill (registered in `Shared::engine_voices`).
     voices: Arc<AtomicU32>,
+}
+
+/// Direct mode (experimental): each stream renders in the device callback itself, just the block
+/// asked for, as REAPER does, instead of on a feeder thread a block and a margin ahead. The latency drops to the device
+/// block (plus less than a tick for an event), but a tick heavier than a block's time is heard as an underrun.
+/// Audio ▸ Direct rendering (`prefs::DIRECT_RENDERING`), read as each stream starts; `LEMON_DIRECT` overrides it.
+fn direct_mode() -> bool {
+    match std::env::var("LEMON_DIRECT") {
+        Ok(v) if !v.is_empty() => v != "0",
+        _ => crate::prefs::check(&crate::prefs::DIRECT_RENDERING),
+    }
 }
 
 /// Frames a stream keeps queued beyond a device block of `block` frames (see `MARGIN_MIN`).
@@ -1073,7 +1087,7 @@ impl Feeder {
     fn fill(&mut self, block: usize) {
         let block = block.max(self.queue.block.load(Ordering::Relaxed)) as u64;
         let w = self.queue.w as u64;
-        let want = w * (block + margin(block, self.rate));
+        let want = w * (block + if self.margin { margin(block, self.rate) } else { 0 });
         let Ok(mut e) = self.engine.lock() else { return };
         // Song playback loops over the loop points as they are now.
         if self.ctl.report.load(Ordering::Relaxed) {
@@ -1103,7 +1117,7 @@ impl Feeder {
                     self.queue.push(s, tick, frame, held, tick_frames);
                     // The playback's meters wait for the device to play this tick.
                     if self.meters && self.ctl.report.load(Ordering::Relaxed) {
-                        if let Ok(mut t) = self.shared.tracks.lock() {
+                        if let Some(mut t) = lock(&self.shared.tracks, self.margin) {
                             t.tick(at, &mut e);
                         }
                     }
@@ -1136,7 +1150,7 @@ impl Feeder {
                 self.shared.load.store((load as f32).to_bits(), Ordering::Relaxed);
                 (self.busy, self.rendered) = (Duration::ZERO, 0);
             }
-            if let Ok(mut t) = self.shared.tracks.lock() {
+            if let Some(mut t) = lock(&self.shared.tracks, self.margin) {
                 e.take_track_peaks(&mut t.now);
             }
         }
@@ -1146,7 +1160,7 @@ impl Feeder {
         }
         // Lit keys run ahead of what is heard by the queue's length (a few milliseconds).
         if frames > 0 && self.ctl.report.load(Ordering::Relaxed) {
-            if let Ok(mut v) = self.shared.sounding.lock() {
+            if let Some(mut v) = lock(&self.shared.sounding, self.margin) {
                 v.clear();
                 if !self.ctl.paused.load(Ordering::Relaxed) && !e.paused() {
                     v.extend(e.sounding().map(|(c, k)| (c as u16, k)));
@@ -1154,6 +1168,12 @@ impl Feeder {
             }
         }
     }
+}
+
+/// `m` locked: waiting for it on a feeder thread (`wait`), else only if it is free (the device callback skips a meter
+/// or lit-key update rather than wait for the UI).
+fn lock<T>(m: &Mutex<T>, wait: bool) -> Option<std::sync::MutexGuard<'_, T>> {
+    if wait { m.lock().ok() } else { m.try_lock().ok() }
 }
 
 /// The audio thread ends with the transport: its streams, feeder threads and engines are gone, and it has let go of
@@ -1461,7 +1481,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     if let Ok(mut e) = s.engine.lock() {
                         e.set_awake(on);
                     }
-                    s.feed.wake();
+                    s.wake();
                 }
             }
             Ok(cmd @ (Cmd::NoteOn(..) | Cmd::Midi(..) | Cmd::TapClick(..))) => {
@@ -1492,7 +1512,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                             _ => {}
                         }
                     }
-                    s.feed.wake();
+                    s.wake();
                 }
             }
             Ok(Cmd::NoteOff(ch, key)) => {
@@ -1500,7 +1520,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     if let Ok(mut e) = s.engine.lock() {
                         e.note_off(ch, key);
                     }
-                    s.feed.wake();
+                    s.wake();
                 }
             }
             Ok(Cmd::PreviewFor(project, limit)) => {
@@ -1547,7 +1567,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                         if let Ok(mut e) = s.engine.lock() {
                             e.note_for(r, n.key, n.velocity, frames);
                         }
-                        s.feed.wake();
+                        s.wake();
                     }
                     continue;
                 }
@@ -1638,7 +1658,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     if let Ok(mut e) = s.engine.lock() {
                         e.pause();
                     }
-                    s.feed.wake();
+                    s.wake();
                 }
                 if listen || live.is_some() {
                     release_paused(&session);
@@ -1657,7 +1677,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     }
                     s.ctl.held.store(false, Ordering::Relaxed);
                     s.ctl.paused.store(false, Ordering::Relaxed);
-                    s.feed.wake();
+                    s.wake();
                 }
             }
             Ok(Cmd::Stop) => {
@@ -1998,8 +2018,9 @@ impl Drop for Detach {
 
 struct Session {
     _detach: Detach,
-    /// Renders ahead of the stream; stopped after the stream leaves the device (fields drop in order).
-    feed: FeedThread,
+    /// Renders ahead of the stream; stopped after the stream leaves the device (fields drop in order). `None` in direct
+    /// mode, where the stream's `Renderer` fills its queue in the device callback.
+    feed: Option<FeedThread>,
     kind: Kind,
     engine: Arc<Mutex<Engine>>,
     done: Arc<AtomicBool>,
@@ -2017,6 +2038,13 @@ struct Session {
 impl Session {
     fn paused(&self) -> bool {
         self.ctl.paused.load(Ordering::Relaxed) || self.ctl.held.load(Ordering::Relaxed)
+    }
+
+    /// Renders now (a live note arrived); in direct mode the next device block does.
+    fn wake(&self) {
+        if let Some(f) = &self.feed {
+            f.wake();
+        }
     }
 
     /// Starts a stream on the output device (opened with the audio settings if it is closed) at `at` (playback: the
@@ -2074,11 +2102,18 @@ impl Session {
         let queue = Arc::new(Queue::new(2 * info.pairs()));
         let mut feeder = Feeder::new(engine.clone(), queue.clone(), shared.clone(), ctl.clone(), rate);
         feeder.meters = kind != Kind::Preview;
-        feeder.fill(PREFILL_FRAMES.max(fixed.unwrap_or(0) as usize));
-        let feed = FeedThread::spawn(feeder);
+        // Direct mode prefills nothing: whatever is queued at the start stays queued, as latency, for the whole stream.
+        let (feed, inline) = if direct_mode() {
+            feeder.margin = false;
+            (None, Some(feeder))
+        } else {
+            feeder.fill(PREFILL_FRAMES.max(fixed.unwrap_or(0) as usize));
+            (Some(FeedThread::spawn(feeder)), None)
+        };
         let mut r = Renderer::new(queue, ctl.clone(), done.clone(), shared.clone(), rate);
         r.tap = kind != Kind::Preview;
-        r.wake = feed.thread();
+        r.wake = feed.as_ref().and_then(FeedThread::thread);
+        r.inline = inline;
         // Started in the middle of the song, it comes in from silence.
         if song && at.tick > 0.0 && !at.paused {
             r.gain = 0.0;
@@ -2096,7 +2131,7 @@ impl Feeder {
             v.retain(|w| w.strong_count() > 0);
             v.push(Arc::downgrade(&voices));
         }
-        Feeder { engine, queue, shared, ctl, meters: true, rate, busy: Duration::ZERO, rendered: 0, voices }
+        Feeder { engine, queue, shared, ctl, meters: true, margin: true, rate, busy: Duration::ZERO, rendered: 0, voices }
     }
 }
 
