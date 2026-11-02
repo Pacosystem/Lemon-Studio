@@ -1,0 +1,9 @@
+#!/bin/sh
+# Launcher for Lemon Studio with yabridge plugins. yabridge's Wine hosts must use the same Wine as the prefix they
+# were set up with; without WINELOADER they start under the system Wine (blank editors, a stray wineserver).
+# Put this on PATH (e.g. ~/.local/bin) and wine-yabridge next to it.
+here=$(dirname "$(readlink -f "$0")")
+if [ -z "$WINELOADER" ] && [ -x "$here/wine-yabridge" ]; then
+    export WINELOADER="$here/wine-yabridge"
+fi
+exec "${LEMON_BIN:-$HOME/.cargo/bin/lemonstudio}" "$@"

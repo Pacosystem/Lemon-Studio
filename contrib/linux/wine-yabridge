@@ -1,0 +1,13 @@
+#!/bin/sh
+# WINELOADER for yabridge: picks a Wine build per prefix. Edit the cases for your prefixes.
+# WINELOADER/WINESERVER point at the real Wine so children and the wineserver are the same version ("version
+# mismatch" otherwise). stdin is reopened on /dev/null: some Wine builds crash at start when it is closed, and
+# yabridge launches its host that way.
+case "${WINEPREFIX%/}" in
+    # A prefix whose plugins need a patched Wine, e.g. JUCE 8 / Direct2D editors such as TONEX 2.
+    */.wine-tonex) d="$HOME/.local/opt/wine-d2d1" ;;
+    *)             d=/opt/wine-cachyos ;;
+esac
+[ -x "$d/bin/wine" ] || d=/usr
+export WINELOADER="$d/bin/wine" WINESERVER="$d/bin/wineserver"
+exec "$WINELOADER" "$@" </dev/null

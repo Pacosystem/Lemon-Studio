@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Lemon Studio
+Comment=Digital audio workstation
+Exec=lemonstudio %f
+Icon=lemonstudio
+Terminal=false
+Categories=AudioVideo;Audio;Midi;
