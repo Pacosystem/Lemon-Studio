@@ -76,15 +76,16 @@ pub fn promote(tid: i32) -> Result<(), String> {
         // priority.
         let _ = std::thread::Builder::new().name("rt watchdog".into()).spawn(watch);
     });
-    // Again at every promotion: the kernel raises the soft cap by a second at each SIGXCPU, which would leave the hard
-    // one to kill the program next time.
-    cap_rttime();
     // Known before it is real-time: a SIGXCPU while rtkit answers must find it.
     remember(tid);
     let param = libc::sched_param { sched_priority: PRIORITY };
     // SAFETY: sets the scheduling policy of a thread of this process.
     let direct = unsafe { libc::sched_setscheduler(tid, libc::SCHED_FIFO | libc::SCHED_RESET_ON_FORK, &param) } == 0;
     if !direct {
+        // Only rtkit needs the cap; capping on the direct path would also lower it for child processes such as
+        // yabridge's plugin hosts, which warn and may fail. Again at every promotion: the kernel raises the soft cap by
+        // a second at each SIGXCPU, which would leave the hard one to kill the program next time.
+        cap_rttime();
         rtkit(tid)?;
     }
     COUNT.fetch_add(1, Ordering::AcqRel);
