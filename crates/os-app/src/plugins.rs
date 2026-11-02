@@ -60,6 +60,9 @@ pub struct Hosted {
     pub attention: Option<Arc<os_host::Attention>>,
     /// The count and time `idle` last looked at it (`Hosted::due`).
     seen: Look,
+    /// When `idle` last asked its open editor for its size (`EDITOR_SIZE_EVERY`).
+    #[cfg(plugin_windows)]
+    sized: Option<Instant>,
     /// Its window opens detached: set when the user adds it while "Open new plugin windows floating" is on (`Plugins::added`),
     /// or chosen for it (window menu > Detached, Switch all plugin editors to ▸), then the mode its window had when it
     /// last closed (spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
@@ -95,6 +98,11 @@ impl Look {
 
 /// An instance whose count did not move is still looked at this often (anything a plugin did not report).
 const LOOK_EVERY: Duration = Duration::from_millis(250);
+/// How often an open editor is asked for its size. The ask holds the instance, and a bridged plugin (yabridge) answers
+/// from another process, often after its own GUI thread has drawn: asked on every UI frame it kept the instance from the
+/// audio thread past `BUSY_WAIT`, which passed the track's sound through unprocessed (heard as artifacts).
+#[cfg(plugin_windows)]
+const EDITOR_SIZE_EVERY: Duration = Duration::from_millis(250);
 
 
 /// How long a whole-state read waits for its moment (`lock_between_blocks`): two blocks of 256 frames and more.
@@ -164,6 +172,8 @@ impl Hosted {
             stand_in: false,
             attention,
             seen: Look::never(),
+            #[cfg(plugin_windows)]
+            sized: None,
             detached: false,
             #[cfg(plugin_windows)]
             placed: None,
@@ -1343,9 +1353,12 @@ impl Plugins {
                     }
                 }
                 #[cfg(plugin_windows)]
-                if let (Some(w), false, Some((ew, eh))) = (&h.window, h.linked(), p.editor_size()) {
-                    let k = w.scale();
-                    w.set_editor_size((ew as f32 / k, eh as f32 / k));
+                if h.window.is_some() && !h.linked() && h.sized.is_none_or(|t| t0.duration_since(t) >= EDITOR_SIZE_EVERY) {
+                    h.sized = Some(t0);
+                    if let (Some(w), Some((ew, eh))) = (&h.window, p.editor_size()) {
+                        let k = w.scale();
+                        w.set_editor_size((ew as f32 / k, eh as f32 / k));
+                    }
                 }
                 if let Some(m) = &h.meter {
                     m.note_hold(t0.elapsed());
